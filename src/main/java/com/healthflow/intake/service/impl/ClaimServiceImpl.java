@@ -14,6 +14,8 @@ import com.healthflow.intake.exception.InvalidClaimStateException;
 import com.healthflow.intake.repository.ClaimRepository;
 import com.healthflow.intake.repository.IdempotencyRepository;
 import com.healthflow.intake.service.ClaimService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.stereotype.Service;
 
@@ -38,10 +40,15 @@ public class ClaimServiceImpl implements ClaimService {
         this.objectMapper = objectMapper;
     }
 
+    private static final Logger log = LoggerFactory.getLogger(ClaimServiceImpl.class);
 
     @Override
     @Transactional
     public CreateClaimResponse createClaim(CreateClaimRequest request, String idempotencyKey) {
+        log.info(
+                "Claim creation started, idempotencyKey={}",
+                idempotencyKey
+        );
         // 1. Generate request hash
         String requestHash = generateRequestHash(request);
 
@@ -52,19 +59,36 @@ public class ClaimServiceImpl implements ClaimService {
 
         if (existing.isPresent()) {
             IdempotencyRecord idempotencyRecord = existing.get();
+            log.info(
+                    "Existing idempotency record found, key={}, status={}",
+                    idempotencyKey,
+                    idempotencyRecord.getStatus()
+            );
             if (!idempotencyRecord.getRequestHash().equals(requestHash)) {
+                log.warn(
+                        "Idempotency conflict detected, key={}",
+                        idempotencyKey
+                );
                 throw new IdempotencyConflictException(
                         "Idempotency key already used with different request"
                 );
             }
 
             if (idempotencyRecord.getStatus() == IdempotencyStatus.COMPLETED) {
+                log.info(
+                        "Returning previously stored response, key={}",
+                        idempotencyKey
+                );
                 return deserializeResponse(
                         idempotencyRecord.getResponseBody()
                 );
             }
             // 5. Request is still being processed
             if (idempotencyRecord.getStatus() == IdempotencyStatus.PROCESSING) {
+                log.info(
+                        "Claim is already being processed, key={}",
+                        idempotencyKey
+                );
 
                 throw new ClaimAlreadyProcessingException(
                         "Request is already being processed"
@@ -127,9 +151,24 @@ public class ClaimServiceImpl implements ClaimService {
     @Override
     @Transactional(readOnly = true)
     public ClaimResponse getClaim(String claimId) {
-        Claim claim = claimRepository.findByClaimId(claimId)
-                .orElseThrow(()-> new ClaimNotFoundException( "claim not found: " + claimId));
+        log.info(
+                "Fetching claim, claimId={}",
+                claimId
+        );
+        Claim claim = claimRepository
+                .findByClaimId(claimId)
+                .orElseThrow(() -> {
 
+                    log.warn(
+                            "Claim not found, claimId={}",
+                            claimId
+                    );
+
+                    return new ClaimNotFoundException(
+                            "Claim not found: " + claimId
+                    );
+                });
+        
         return new ClaimResponse (
                 claim.getClaimId(),
                 claim.getPatientId(),
