@@ -7,17 +7,16 @@ import com.healthflow.intake.entity.Claim;
 import com.healthflow.intake.entity.IdempotencyRecord;
 import com.healthflow.intake.enums.ClaimStatus;
 import com.healthflow.intake.enums.IdempotencyStatus;
-import com.healthflow.intake.exception.ClaimAlreadyProcessingException;
-import com.healthflow.intake.exception.ClaimNotFoundException;
-import com.healthflow.intake.exception.IdempotencyConflictException;
-import com.healthflow.intake.exception.InvalidClaimStateException;
+import com.healthflow.intake.exception.*;
 import com.healthflow.intake.repository.ClaimRepository;
 import com.healthflow.intake.repository.IdempotencyRepository;
 import com.healthflow.intake.service.ClaimService;
+import com.healthflow.intake.service.IdempotencyService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -33,11 +32,13 @@ public class ClaimServiceImpl implements ClaimService {
     private final ClaimRepository claimRepository;
     private final IdempotencyRepository idempotencyRepository;
     private final ObjectMapper objectMapper;
+    private final IdempotencyService idempotencyService;
 
-    public ClaimServiceImpl(ClaimRepository claimRepository, IdempotencyRepository idempotencyRepository, ObjectMapper objectMapper) {
+    public ClaimServiceImpl(ClaimRepository claimRepository, IdempotencyRepository idempotencyRepository, ObjectMapper objectMapper, IdempotencyService idempotencyService) {
         this.claimRepository = claimRepository;
         this.idempotencyRepository = idempotencyRepository;
         this.objectMapper = objectMapper;
+        this.idempotencyService = idempotencyService;
     }
 
     private static final Logger log = LoggerFactory.getLogger(ClaimServiceImpl.class);
@@ -96,19 +97,14 @@ public class ClaimServiceImpl implements ClaimService {
             }
         }
         // 7. Create idempotency record
-        IdempotencyRecord idempotencyRecord =
-                new IdempotencyRecord();
+        boolean created = idempotencyService.createProcessingRecord(idempotencyKey, requestHash);
 
-        idempotencyRecord.setIdempotencyKey(idempotencyKey);
-        idempotencyRecord.setRequestHash(requestHash);
-        idempotencyRecord.setStatus(
-                IdempotencyStatus.PROCESSING
-        );
-        idempotencyRecord.setCreatedAt(
-                LocalDateTime.now()
-        );
-
-        idempotencyRepository.save(idempotencyRecord);
+        if (!created) {
+            throw new ConcurrentIdempotencyException(
+                    "Another request with the same Idempotency-Key " +
+                            "is being processed"
+            );
+        }
 
         String claimId = "CLM-" + UUID.randomUUID();
         Claim claim = new Claim();
@@ -132,6 +128,13 @@ public class ClaimServiceImpl implements ClaimService {
                         workflowId,
                         "PROCESSING"
                 );
+
+        IdempotencyRecord idempotencyRecord =
+                idempotencyRepository
+                        .findByIdempotencyKey(idempotencyKey)
+                        .orElseThrow(() ->
+                                new IllegalStateException(
+                                        "Idempotency record not found"));
 
         // 11. Store response in idempotency record
         idempotencyRecord.setResponseBody(
@@ -168,8 +171,8 @@ public class ClaimServiceImpl implements ClaimService {
                             "Claim not found: " + claimId
                     );
                 });
-        
-        return new ClaimResponse (
+
+        return new ClaimResponse(
                 claim.getClaimId(),
                 claim.getPatientId(),
                 claim.getProviderId(),
@@ -184,7 +187,7 @@ public class ClaimServiceImpl implements ClaimService {
     @Override
     @Transactional(readOnly = true)
     public ClaimStatusResponse getClaimStatus(String claimId) {
-        Claim claim = claimRepository.findByClaimId(claimId).orElseThrow(()-> new ClaimNotFoundException("Claim not found : " + claimId));
+        Claim claim = claimRepository.findByClaimId(claimId).orElseThrow(() -> new ClaimNotFoundException("Claim not found : " + claimId));
         return new ClaimStatusResponse(
                 claim.getClaimId(),
                 claim.getStatus()
@@ -192,20 +195,31 @@ public class ClaimServiceImpl implements ClaimService {
     }
 
     @Override
-    @Transactional(readOnly = true)
+    @Transactional
     public RetryClaimResponse retryClaim(String claimId) {
-      Claim claim = claimRepository.findByClaimId(claimId).orElseThrow(()-> new ClaimNotFoundException("Claim not found: " + claimId));
-       if(claim.getStatus() != ClaimStatus.FAILED){
-           throw new InvalidClaimStateException("Claim can only be retried when status is FAILED." + "Current status: " + claim.getStatus());
-       }
-       claim.setStatus(ClaimStatus.RECEIVED);
-       claim.setUpdatedAt(LocalDateTime.now());
-       claimRepository.save(claim);
-       return new RetryClaimResponse(
-               claim.getClaimId(),
-               claim.getStatus(),
-               "Claim retry initiated successfully"
-       );
+
+        claimRepository.findByClaimId(claimId).orElseThrow(() ->
+                        new ClaimNotFoundException(
+                                "Claim not found: " + claimId));
+
+        int updatedRows = claimRepository.transitionStatus(
+                        claimId,
+                        ClaimStatus.FAILED,
+                        ClaimStatus.RECEIVED
+                );
+
+        if (updatedRows == 0) {
+
+            throw new InvalidClaimStateException(
+                    "Claim is no longer in FAILED state"
+            );
+        }
+
+        return new RetryClaimResponse(
+                claimId,
+                ClaimStatus.RECEIVED,
+                "Claim retry initiated successfully"
+        );
     }
 
     private String generateRequestHash(
