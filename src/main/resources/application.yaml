@@ -25,3 +25,13 @@ spring:
 logging:
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{Correlation-ID}] [%thread] %logger{36} - %msg%n"
+
+
+  kafka:
+    bootstrap-servers: localhost:9092
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all #Producer asks Kafka to acknowledge the message only after the required in-sync replicas have acknowledged it.
+      retries: 3

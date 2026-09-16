@@ -34,6 +34,7 @@ dependencies {
 	testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 	testAnnotationProcessor("org.projectlombok:lombok")
 	implementation ("com.fasterxml.jackson.core:jackson-databind")
+	implementation ("org.springframework.kafka:spring-kafka")
 }
 
 tasks.withType<Test> {
