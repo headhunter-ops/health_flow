@@ -15,5 +15,9 @@ public class ClaimEventConsumer {
         System.out.println(
                 "Received claim event: " + message
         );
+
+        throw new RuntimeException(
+                "Validation service temporarily unavailable"
+        );
     }
 }
